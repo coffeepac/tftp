@@ -7,8 +7,11 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -230,14 +233,28 @@ func initABit() {
 
 func main() {
 	initABit()
+
 	server, err := net.ListenPacket("udp", ":9010") //  change to 69 before submit
 	defer server.Close()
+
+	signals := make(chan os.Signal)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+
+	keepLooping := true
+	go func() {
+		log.Println("wait for it")
+		<-signals
+		log.Println("quitting time!")
+		server.SetDeadline(time.Now())
+		keepLooping = false
+	}()
+
 	if err != nil {
 		fmt.Println(err)
 	} else {
 		buf := make([]byte, 2048)
 		txID := int64(0)
-		for txID < 50 {
+		for keepLooping {
 			_, addr, err := server.ReadFrom(buf)
 			if err != nil {
 				log.Println("Unable to read packet from connection.  Error: ", err)

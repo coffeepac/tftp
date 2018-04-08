@@ -1,6 +1,4 @@
 ToDo:
 - implement request log
-- CTRL-C to exit cleanly
-  - remove txn limit loop
 - set list port to 69
 - testing....
