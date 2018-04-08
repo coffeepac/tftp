@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,11 +17,12 @@ import (
 )
 
 var files map[string]string
-var connectionAttempts = 15 // attempts to randomly find an unused port
-var connRetries = 5         // attempts to send or wait
-var portRangeStart = 49152  // IANA recommended port range start for ephemeral ports
-var portRangeSize = 16383   // IANA recommended port range size for ephemeral ports
-var timeoutSeconds = 10     // timeout for all ReadFroms in seconds
+var connectionAttempts = 15                                                            // attempts to randomly find an unused port
+var connRetries = 5                                                                    // attempts to send or wait
+var portRangeStart = 49152                                                             // IANA recommended port range start for ephemeral ports
+var portRangeSize = 16383                                                              // IANA recommended port range size for ephemeral ports
+var timeoutSeconds = 10                                                                // timeout for all ReadFroms in seconds
+var txnTemplate = "Transaction #%d of type %s completed with status %s and notes %s\n" // template so all txn log messages look the same
 
 func futureAck(addr net.Addr, conn net.PacketConn) {
 	errPack := wire.PacketError{Code: uint16(0), Msg: "Received ACK for packet not yet sent."}
@@ -101,10 +103,10 @@ func tftpReadFrom(conn net.PacketConn, addr net.Addr, prevData []byte) ([]byte, 
 	}
 }
 
-func opRead(request *wire.PacketRequest, addr net.Addr, txID int64) {
+func opRead(request *wire.PacketRequest, addr net.Addr, txID int64, txns chan string) {
 	conn := newTIDConnection(txID)
 	if conn == nil {
-		//TODO: write txn to log file
+		txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "unable to open new TID connection")
 		return
 	}
 	defer conn.Close()
@@ -131,20 +133,20 @@ func opRead(request *wire.PacketRequest, addr net.Addr, txID int64) {
 						continue
 					} else {
 						log.Println("ReadFrom failed.  Aborting. error: ", err)
-						//TODO: write txn to log file
+						txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "ACK packet read failed.  Check application log")
 						return
 					}
 				}
 				ackPack, err := wire.ParsePacket(buf)
 				if err != nil {
 					badPacket(addr, conn, err)
-					//TODO: write txn to log file
+					txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "ACK packet parsing failed.  Check application log")
 					return
 				}
 				ack, ok := ackPack.(*wire.PacketAck)
 				if !ok {
 					unexpectedPacket(addr, conn, "ACK")
-					//TODO: write txn to log file
+					txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "Received unexpected packet type.  Check application log")
 					return
 				}
 				if ack.BlockNum != blockNum {
@@ -153,7 +155,7 @@ func opRead(request *wire.PacketRequest, addr net.Addr, txID int64) {
 					} else {
 						// ACK from the future.  I assume something is Wrong on the sending side.
 						futureAck(addr, conn)
-						//TODO: write txn to log file
+						txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "Recevied ACK from future.  Check application log")
 						return
 					}
 				} else {
@@ -166,15 +168,18 @@ func opRead(request *wire.PacketRequest, addr net.Addr, txID int64) {
 	} else {
 		errPack := wire.PacketError{Code: 1, Msg: "File not found"}
 		conn.WriteTo(errPack.Serialize(), addr)
-		//TODO: write txn to log file
+		txns <- fmt.Sprintf(txnTemplate, txID, "READ", "failed", "Requested file not found.")
+		return
 	}
+
+	txns <- fmt.Sprintf(txnTemplate, txID, "READ", "success", "<none>")
 
 }
 
-func opWrite(request *wire.PacketRequest, addr net.Addr, txID int64) {
+func opWrite(request *wire.PacketRequest, addr net.Addr, txID int64, txns chan string) {
 	conn := newTIDConnection(txID)
 	if conn == nil {
-		//TODO: write txn to log file
+		txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "failed", "unable to open new TID connection")
 		return
 	}
 	defer conn.Close()
@@ -184,7 +189,7 @@ func opWrite(request *wire.PacketRequest, addr net.Addr, txID int64) {
 	_, err := conn.WriteTo(ack.Serialize(), addr)
 	if err != nil {
 		log.Println("Initial ACK failed.  Aborting. error: ", err)
-		//TODO: write txn to log file
+		txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "failed", "initial ACK failed")
 		return
 	}
 
@@ -198,20 +203,20 @@ func opWrite(request *wire.PacketRequest, addr net.Addr, txID int64) {
 				continue
 			} else {
 				log.Println("ReadFrom failed.  Aborting. error: ", err)
-				//TODO: write txn to log file
+				txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "failed", "DATA packet read failed.  Check application log")
 				return
 			}
 		} else {
 			dPacket, err := wire.ParsePacket(buf)
 			if err != nil {
 				badPacket(addr, conn, err)
-				//TODO: write txn to log file
+				txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "failed", "DATA packet parsing failed.  Check application log")
 				return
 			}
 			data, ok := dPacket.(*wire.PacketData)
 			if !ok {
 				unexpectedPacket(addr, conn, "DATA")
-				//TODO: write txn to log file
+				txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "failed", "Received unexpected packet type.  Check application log")
 				return
 			}
 			fileContents = fileContents + string(data.Data[:n-4]) // fudge factor for header
@@ -223,7 +228,17 @@ func opWrite(request *wire.PacketRequest, addr net.Addr, txID int64) {
 		}
 	}
 	files[request.Filename] = fileContents
+	txns <- fmt.Sprintf(txnTemplate, txID, "WRITE", "success", "<none>")
+}
 
+func logTxns(txnFile *os.File, txns chan string) {
+	for {
+		txn := <-txns
+		_, err := txnFile.WriteString(txn)
+		if err != nil {
+			log.Printf("Failed to log txn '%s' with error '%s'\n", txn, err)
+		}
+	}
 }
 
 func initABit() {
@@ -234,50 +249,66 @@ func initABit() {
 func main() {
 	initABit()
 
+	// create server
 	server, err := net.ListenPacket("udp", ":9010") //  change to 69 before submit
-	defer server.Close()
-
-	signals := make(chan os.Signal)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-
-	keepLooping := true
-	go func() {
-		log.Println("wait for it")
-		<-signals
-		log.Println("quitting time!")
-		server.SetDeadline(time.Now())
-		keepLooping = false
-	}()
-
 	if err != nil {
 		fmt.Println(err)
 	} else {
+		defer server.Close()
+
+		// signal handling
+		signals := make(chan os.Signal)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+
+		keepLooping := true
+		go func() {
+			<-signals
+			server.SetDeadline(time.Now())
+			keepLooping = false
+		}()
+
+		// txn log create
+		ex, err := os.Executable()
+		if err != nil {
+			log.Fatal("Unable to find path to running executable.  Unable to create txn file in sensible location. error: ", err)
+		}
+		exPath := filepath.Dir(ex)
+		txnLog := filepath.Join(exPath, "tftpTxn.log")
+		txnFile, err := os.Create(txnLog)
+		if err != nil {
+			log.Fatal("Unable to create file in same dir as running executable.  Quit.  error: ", err)
+		}
+		defer txnFile.Close()
+
+		txns := make(chan string)
+		go logTxns(txnFile, txns)
+
 		buf := make([]byte, 2048)
 		txID := int64(0)
 		for keepLooping {
 			_, addr, err := server.ReadFrom(buf)
 			if err != nil {
 				log.Println("Unable to read packet from connection.  Error: ", err)
-				// TODO write txn to log file
+				txns <- fmt.Sprintf(txnTemplate, txID, "unknown", "failed", "Initial packet unreadable")
 			} else {
 				packet, err := wire.ParsePacket(buf)
 				if err != nil {
 					// incorrectly formated packet
 					go badPacket(addr, server, err)
-					// TODO write txn to log file
+					txns <- fmt.Sprintf(txnTemplate, txID, "unknown", "failed", "Initial packet corrupted")
 				} else {
 					packetRequest, ok := packet.(*wire.PacketRequest)
 					if !ok {
 						log.Println(packet)
 						unexpectedPacket(addr, server, "RRQ or WRQ")
-						// TODO write txn to log file
+						txns <- fmt.Sprintf(txnTemplate, txID, "unknown", "failed", "Initial packet not RRQ or WRQ")
 					} else if strings.ToLower(packetRequest.Mode) != "octet" {
 						unsupportedMode(addr, server)
-						// TODO write txn to log file
+						txns <- fmt.Sprintf(txnTemplate, txID, "unknown", "failed", "Communication not in OCTET mode")
 					} else if packetRequest.Op == wire.OpRRQ {
-						go opRead(packetRequest, addr, txID)
+						go opRead(packetRequest, addr, txID, txns)
 					} else if packetRequest.Op == wire.OpWRQ {
-						go opWrite(packetRequest, addr, txID)
+						go opWrite(packetRequest, addr, txID, txns)
 					}
 				}
 			}
@@ -285,8 +316,9 @@ func main() {
 		}
 	}
 
-	for k, v := range files {
-		fmt.Println("filename: ", k, ".  File contents: ", v)
+	fmt.Println("Full list of files in memory at server quit:")
+	for k, _ := range files {
+		fmt.Println("filename: ", k)
 	}
 
 }
