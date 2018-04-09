@@ -21,7 +21,7 @@ var connectionAttempts = 15                                                     
 var connRetries = 5                                                                    // attempts to send or wait
 var portRangeStart = 49152                                                             // IANA recommended port range start for ephemeral ports
 var portRangeSize = 16383                                                              // IANA recommended port range size for ephemeral ports
-var timeoutSeconds = 10                                                                // timeout for all ReadFroms in seconds
+var timeoutSeconds = 20                                                                // timeout for all ReadFroms in seconds
 var txnTemplate = "Transaction #%d of type %s completed with status %s and notes %s\n" // template so all txn log messages look the same
 
 func futureAck(addr net.Addr, conn net.PacketConn) {
@@ -37,7 +37,7 @@ func unexpectedPacket(addr net.Addr, conn net.PacketConn, packetType string) {
 }
 
 func badPacket(addr net.Addr, conn net.PacketConn, err error) {
-	badPacket := wire.PacketError{Code: 0, Msg: "Malfomred packet"}
+	badPacket := wire.PacketError{Code: 0, Msg: "Malformed packet"}
 	conn.WriteTo(badPacket.Serialize(), addr)
 	log.Println("Received an incorrectly formatted packet.  Aborting connection.  error: ", err)
 }
@@ -78,7 +78,7 @@ func tftpReadFrom(conn net.PacketConn, addr net.Addr, prevData []byte) ([]byte, 
 	var readAddr net.Addr
 	var err error
 	for retryCounter < connRetries && !readComplete {
-		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		conn.SetDeadline(time.Now().Add(time.Duration(timeoutSeconds) * time.Second))
 		n, readAddr, err = conn.ReadFrom(data)
 		if err != nil && err.(net.Error).Timeout() == true {
 			conn.WriteTo(prevData, addr)
@@ -243,7 +243,6 @@ func logTxns(txnFile *os.File, txns chan string) {
 
 func initABit() {
 	files = make(map[string]string, 1000)
-	files["cheese"] = "This is not the sound of the train"
 }
 
 func main() {
@@ -316,7 +315,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Full list of files in memory at server quit:")
+	fmt.Println("Full list of files in memory at server quit")
 	for k, _ := range files {
 		fmt.Println("filename: ", k)
 	}
