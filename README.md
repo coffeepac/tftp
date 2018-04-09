@@ -21,6 +21,14 @@ execute this server as root.  The transaction log will be created in the
 project root directory with name `tftpTxn.log`.  This server will also write
 out all file names that have been stored to STDOUT when killed with CTRL-C.
 
+The RFC is unclear on what should happen if a file already exists so I have
+chosen to let the last writer to complete win, essentially OVERWRITE mode.
+If we wanted to implement a different algorithm, such as the first writer to 
+start writing or the first writer to finish, we would need to store the txn ID 
+that was used for all file writes, then be careful of wrap-around, and check 
+for key existance before saving the file AFTER receiving all DATA packets,
+respectively.
+
 Testing
 -------
 Unit tests exist for generating connection on ephemeral port, error packet 
@@ -47,6 +55,10 @@ could
 - drop and rebuild the connection to ensure things function
 - send out-of-order ACKs and unknown TIDs
 This would be done to make sure the entire application functions under duress.
+
+The integration script should also send multiple requests simultaneously, write
+multiple streams to the same filename simultaneously and attempt to read before
+files are fully written.
 
 
 Product Roadmap
