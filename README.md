@@ -39,6 +39,15 @@ I've run out of time:
     - unexpected TID during a retry loop 
     - jumbled ACKs
 
+There are no integration tests.  If time permitted I would have built a bash
+script that wrote several files and read them back to make sure there was no
+corruption.  I also would have written at least one very large file over a
+locally port forwarded connection.  While the large file is transferring I 
+could 
+- drop and rebuild the connection to ensure things function
+- send out-of-order ACKs and unknown TIDs
+This would be done to make sure the entire application functions under duress.
+
 
 Product Roadmap
 ---------------
